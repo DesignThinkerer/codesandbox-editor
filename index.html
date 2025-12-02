@@ -1,0 +1,682 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { 
+  Copy, RefreshCw, AlertCircle, Trash2, 
+  Folder, FolderOpen, FileCode, ChevronRight, ChevronDown, Layout,
+  Code, Save, ExternalLink, FilePlus, FolderPlus, Edit2, X, PlusCircle
+} from 'lucide-react';
+
+// URL de la librairie LZString (CDN)
+const LZSTRING_CDN = "https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.4.4/lz-string.min.js";
+
+// Constantes pour la construction de l'URL
+const CODESANDBOX_BASE = "https://codesandbox.io/api/v1/sandboxes/define";
+const CODESANDBOX_QUERY = "query=file%3D%252Findex.js%26utm_medium%3Dsandpack&environment=create-react-app";
+
+const DEFAULT_INPUT = "";
+
+// --- Utilitaires de parsing de fichiers ---
+
+const buildFileTree = (filesMap) => {
+  const root = { name: "root", type: "folder", children: [], path: "" };
+
+  Object.keys(filesMap).forEach((filePath) => {
+    const parts = filePath.split('/');
+    let currentLevel = root;
+
+    parts.forEach((part, index) => {
+      const isFile = index === parts.length - 1;
+      let existingPath = currentLevel.children.find(child => child.name === part);
+
+      if (existingPath) {
+        currentLevel = existingPath;
+      } else {
+        const newPart = {
+          name: part,
+          type: isFile ? "file" : "folder",
+          path: isFile ? filePath : `${currentLevel.path}/${part}`,
+          content: isFile ? (filesMap[filePath].content || filesMap[filePath].code) : null,
+          children: []
+        };
+        currentLevel.children.push(newPart);
+        currentLevel = newPart;
+      }
+    });
+  });
+
+  const sortTree = (node) => {
+    if (node.children) {
+      node.children.sort((a, b) => {
+        if (a.type === b.type) return a.name.localeCompare(b.name);
+        return a.type === "folder" ? -1 : 1;
+      });
+      node.children.forEach(sortTree);
+    }
+  };
+  sortTree(root);
+  return root.children;
+};
+
+// --- Composant Modal Simple ---
+const Modal = ({ title, isOpen, onClose, children }) => {
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-lg shadow-xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+        <div className="px-4 py-3 bg-gray-50 border-b border-gray-100 flex justify-between items-center">
+          <h3 className="font-semibold text-gray-700">{title}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X size={18}/></button>
+        </div>
+        <div className="p-4">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// --- Composant Éditeur Simple ---
+const SimpleCodeEditor = ({ content, fileName, onChange }) => {
+  const [value, setValue] = useState(content || '');
+
+  useEffect(() => {
+    setValue(content || '');
+  }, [content]);
+
+  const handleChange = (e) => {
+    const newValue = e.target.value;
+    setValue(newValue);
+    onChange(newValue);
+  };
+
+  const lines = useMemo(() => value.split('\n'), [value]);
+
+  return (
+    <div className="flex h-full w-full bg-white text-sm font-mono overflow-hidden relative">
+      <div className="bg-gray-50 border-r border-gray-200 py-4 px-2 text-right select-none h-full overflow-hidden w-12 shrink-0">
+        {lines.map((_, i) => (
+          <div key={i} className="text-gray-400 leading-6 text-xs h-6">
+            {i + 1}
+          </div>
+        ))}
+      </div>
+      <textarea
+        value={value}
+        onChange={handleChange}
+        spellCheck="false"
+        className="flex-1 p-4 outline-none resize-none leading-6 text-gray-800 whitespace-pre font-mono h-full w-full overflow-auto"
+        style={{ tabSize: 2 }}
+      />
+    </div>
+  );
+};
+
+// --- Composant Arbre de fichiers avec Actions ---
+const FileTreeNode = ({ node, depth, onFileSelect, activePath, onAction }) => {
+  const [isOpen, setIsOpen] = useState(true);
+  const isFolder = node.type === 'folder';
+  const isActive = node.path === activePath;
+
+  const handleClick = (e) => {
+    e.stopPropagation();
+    if (isFolder) {
+      setIsOpen(!isOpen);
+    } else {
+      onFileSelect(node);
+    }
+  };
+
+  const handleAction = (e, actionType) => {
+    e.stopPropagation();
+    onAction(actionType, node);
+  };
+
+  return (
+    <div>
+      <div 
+        onClick={handleClick}
+        className={`group flex items-center justify-between py-1 pr-2 cursor-pointer select-none text-sm transition-colors
+          ${isActive ? 'bg-blue-100 text-blue-700' : 'hover:bg-gray-100 text-gray-700'}
+        `}
+        style={{ paddingLeft: `${depth * 12 + 8}px` }}
+      >
+        <div className="flex items-center gap-1.5 flex-1 overflow-hidden">
+          <span className="text-gray-400 shrink-0">
+            {isFolder ? (
+              isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />
+            ) : (
+              <span className="w-[14px]" /> 
+            )}
+          </span>
+          <span className={`${isFolder ? 'text-blue-400' : 'text-gray-500'}`}>
+            {isFolder ? (
+              isOpen ? <FolderOpen size={16} /> : <Folder size={16} />
+            ) : (
+              <FileCode size={16} />
+            )}
+          </span>
+          <span className={`truncate ${isActive ? 'font-medium' : ''}`}>{node.name}</span>
+        </div>
+        
+        {/* Boutons d'action visibles au survol */}
+        <div className="hidden group-hover:flex items-center gap-1">
+            <button 
+                onClick={(e) => handleAction(e, 'rename')}
+                className="p-1 hover:bg-gray-200 rounded text-gray-500" 
+                title="Renommer / Déplacer"
+            >
+                <Edit2 size={12}/>
+            </button>
+            <button 
+                onClick={(e) => handleAction(e, 'delete')}
+                className="p-1 hover:bg-red-100 hover:text-red-600 rounded text-gray-500" 
+                title="Supprimer"
+            >
+                <Trash2 size={12}/>
+            </button>
+        </div>
+      </div>
+      
+      {isFolder && isOpen && (
+        <div>
+          {node.children.map((child) => (
+            <FileTreeNode 
+              key={child.name + child.path} 
+              node={child} 
+              depth={depth + 1} 
+              onFileSelect={onFileSelect}
+              activePath={activePath}
+              onAction={onAction}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default function App() {
+  const [input, setInput] = useState(DEFAULT_INPUT);
+  const [projectData, setProjectData] = useState(null);
+  const [fileTree, setFileTree] = useState([]);
+  const [activeFile, setActiveFile] = useState(null);
+  const [error, setError] = useState(null);
+  const [libLoaded, setLibLoaded] = useState(false);
+  const [viewMode, setViewMode] = useState('editor'); 
+  const [isDirty, setIsDirty] = useState(false);
+
+  // État pour les modales
+  const [modalState, setModalState] = useState({ type: null, isOpen: false, targetNode: null });
+  const [modalInput, setModalInput] = useState('');
+
+  useEffect(() => {
+    if (window.LZString) {
+      setLibLoaded(true);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = LZSTRING_CDN;
+    script.async = true;
+    script.onload = () => setLibLoaded(true);
+    script.onerror = () => setError("Impossible de charger la librairie de décompression.");
+    document.body.appendChild(script);
+    return () => { if (document.body.contains(script)) document.body.removeChild(script); };
+  }, []);
+
+  const decodeString = (str) => {
+    if (!str.trim() || !window.LZString) return;
+    
+    let compressedPart = str.trim();
+    if (str.includes('parameters=')) {
+        try {
+            const match = str.match(/parameters=([^&]+)/);
+            if (match && match[1]) compressedPart = match[1];
+        } catch (e) {
+            console.warn("Erreur extraction URL");
+        }
+    }
+
+    try {
+      const fixedInput = compressedPart.replace(/-/g, '+').replace(/_/g, '/');
+      const decompressed = window.LZString.decompressFromBase64(fixedInput);
+      
+      if (!decompressed) throw new Error("Résultat vide ou invalide");
+      
+      const jsonObject = JSON.parse(decompressed);
+      setProjectData(jsonObject);
+      refreshTree(jsonObject);
+      
+      setIsDirty(false);
+      setError(null);
+    } catch (err) {
+      console.error(err);
+      setError("Erreur de décodage. Vérifiez si l'URL ou la chaîne LZ est valide.");
+    }
+  };
+
+  const refreshTree = (data) => {
+      if (data.files) {
+        const tree = buildFileTree(data.files);
+        setFileTree(tree);
+        if (!activeFile) {
+            const findFirstFile = (nodes) => {
+            for (const node of nodes) {
+                if (node.type === 'file') return node;
+                if (node.children) {
+                  const found = findFirstFile(node.children);
+                  if (found) return found;
+                }
+            }
+            return null;
+            };
+            const first = findFirstFile(tree);
+            if (first) setActiveFile(first);
+        }
+      } else {
+        setFileTree([]);
+        setActiveFile(null);
+      }
+  };
+
+  const updateLZString = useCallback((newData) => {
+    if (!window.LZString) return;
+    try {
+      const jsonString = JSON.stringify(newData);
+      const compressed = window.LZString.compressToBase64(jsonString);
+      const urlSafe = compressed.replace(/\+/g, '-').replace(/\//g, '_');
+      const fullUrl = `${CODESANDBOX_BASE}?parameters=${urlSafe}&${CODESANDBOX_QUERY}`;
+      
+      setInput(fullUrl);
+      setIsDirty(true);
+    } catch (e) {
+      console.error("Erreur compression", e);
+    }
+  }, []);
+
+  // --- Gestion du système de fichiers ---
+
+  const handleCreateFile = () => {
+    const parentPath = activeFile && activeFile.type === 'folder' 
+        ? activeFile.path + '/' 
+        : (activeFile ? activeFile.path.substring(0, activeFile.path.lastIndexOf('/') + 1) : '');
+    
+    setModalInput(parentPath);
+    setModalState({ type: 'create_file', isOpen: true, targetNode: null });
+  };
+
+  const handleCreateFolder = () => {
+    const parentPath = activeFile && activeFile.type === 'folder' 
+        ? activeFile.path + '/' 
+        : (activeFile ? activeFile.path.substring(0, activeFile.path.lastIndexOf('/') + 1) : '');
+        
+    setModalInput(parentPath);
+    setModalState({ type: 'create_folder', isOpen: true, targetNode: null });
+  };
+
+  const handleNodeAction = (action, node) => {
+      if (action === 'delete') {
+          // Utilisation de la modale custom au lieu de confirm()
+          setModalState({ type: 'delete', isOpen: true, targetNode: node });
+      } else if (action === 'rename') {
+          setModalInput(node.path);
+          setModalState({ type: 'rename', isOpen: true, targetNode: node });
+      }
+  };
+
+  const performDelete = (node) => {
+      const newFiles = { ...projectData.files };
+      
+      if (node.type === 'folder') {
+          Object.keys(newFiles).forEach(key => {
+              if (key === node.path || key.startsWith(node.path + '/')) {
+                  delete newFiles[key];
+              }
+          });
+      } else {
+          delete newFiles[node.path];
+      }
+      
+      const newData = { ...projectData, files: newFiles };
+      setProjectData(newData);
+      refreshTree(newData);
+      updateLZString(newData);
+      if (activeFile && (activeFile.path === node.path || activeFile.path.startsWith(node.path + '/'))) {
+          setActiveFile(null);
+      }
+  };
+
+  const submitModal = () => {
+      const { type, targetNode } = modalState;
+      
+      if (type === 'delete') {
+          performDelete(targetNode);
+          setModalState({ ...modalState, isOpen: false });
+          return;
+      }
+      
+      if (!modalInput.trim()) return;
+      
+      const newFiles = { ...projectData ? projectData.files : {} };
+      
+      if (type === 'create_file') {
+          if (!newFiles[modalInput]) {
+              newFiles[modalInput] = { content: '// Nouveau fichier' };
+          }
+      } 
+      else if (type === 'create_folder') {
+          const keepPath = modalInput.endsWith('/') ? `${modalInput}.keep` : `${modalInput}/.keep`;
+          if (!newFiles[keepPath]) {
+              newFiles[keepPath] = { content: '' };
+          }
+      }
+      else if (type === 'rename') {
+          const oldPath = targetNode.path;
+          const newPath = modalInput;
+          
+          if (targetNode.type === 'file') {
+              newFiles[newPath] = newFiles[oldPath];
+              delete newFiles[oldPath];
+          } else {
+              Object.keys(newFiles).forEach(key => {
+                  if (key === oldPath || key.startsWith(oldPath + '/')) {
+                      const suffix = key.substring(oldPath.length);
+                      newFiles[newPath + suffix] = newFiles[key];
+                      delete newFiles[key];
+                  }
+              });
+          }
+      }
+
+      const newData = { ...projectData, files: newFiles };
+      setProjectData(newData);
+      refreshTree(newData);
+      updateLZString(newData);
+      setModalState({ ...modalState, isOpen: false });
+  };
+
+  // Nouvelle logique de gestion du bouton principal
+  const handleManualDecode = () => {
+    // Si l'input est vide (ou juste des espaces), on initialise un projet vide
+    if (!input || !input.trim()) {
+       const emptyData = { files: {} };
+       setProjectData(emptyData);
+       setFileTree([]);
+       setActiveFile(null);
+       setError(null);
+       setIsDirty(false);
+       return;
+    }
+    // Sinon on décode
+    decodeString(input);
+  };
+
+  const getFullShareUrl = useCallback((currentInput) => {
+    if (!currentInput) return '';
+    if (currentInput.startsWith('http')) return currentInput;
+    const cleanParams = currentInput.trim().replace(/\+/g, '-').replace(/\//g, '_');
+    return `${CODESANDBOX_BASE}?parameters=${cleanParams}&${CODESANDBOX_QUERY}`;
+  }, []);
+
+  const handleFileChange = (newContent) => {
+    if (!activeFile || !projectData) return;
+    const updatedData = { ...projectData };
+    if (updatedData.files && updatedData.files[activeFile.path]) {
+      if (updatedData.files[activeFile.path].content !== undefined) {
+        updatedData.files[activeFile.path].content = newContent;
+      } else {
+         updatedData.files[activeFile.path].code = newContent;
+      }
+    }
+    setProjectData(updatedData);
+    setActiveFile({ ...activeFile, content: newContent });
+    updateLZString(updatedData);
+  };
+
+  const copyToClipboard = () => {
+    const textArea = document.createElement("textarea");
+    textArea.value = getFullShareUrl(input);
+    document.body.appendChild(textArea);
+    textArea.select();
+    document.execCommand('copy');
+    document.body.removeChild(textArea);
+    setIsDirty(false); 
+  };
+
+  return (
+    <div className="h-screen flex flex-col bg-gray-50 text-gray-800 font-sans">
+      <header className="flex items-center justify-between px-4 py-3 bg-white border-b border-gray-200 shadow-sm z-10">
+        <div className="flex items-center space-x-3">
+          <div className="p-1.5 bg-blue-600 rounded-lg">
+            <Layout className="w-5 h-5 text-white" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-gray-900 leading-tight">CodeSandbox Editor</h1>
+            <p className="text-xs text-gray-500 hidden sm:block">LZ-String & File Manager</p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+           {isDirty && (
+               <span className="text-xs text-green-600 font-medium animate-pulse flex items-center mr-2">
+                   <Save size={12} className="mr-1"/> URL mise à jour
+               </span>
+           )}
+           {projectData && (
+             <div className="flex items-center gap-2">
+               <a 
+                  href={getFullShareUrl(input)}
+                  target="_blank" 
+                  rel="noreferrer"
+                  className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-green-600 hover:bg-green-700 rounded-md transition-colors shadow-sm mr-2"
+               >
+                 Ouvrir dans CodeSandbox <ExternalLink size={12}/>
+               </a>
+               <div className="flex bg-gray-100 rounded-lg p-1">
+                 <button 
+                  onClick={() => setViewMode('editor')}
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${viewMode === 'editor' ? 'bg-white shadow text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                 >
+                   Éditeur
+                 </button>
+                 <button 
+                  onClick={() => setViewMode('json')}
+                  className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${viewMode === 'json' ? 'bg-white shadow text-blue-600' : 'text-gray-500 hover:text-gray-700'}`}
+                 >
+                   JSON
+                 </button>
+               </div>
+             </div>
+           )}
+           <button 
+             onClick={() => { setInput(''); setProjectData(null); setIsDirty(false); }}
+             className="text-xs px-3 py-1.5 text-red-600 hover:bg-red-50 rounded-md transition-colors border border-transparent hover:border-red-100"
+           >
+             Nouveau
+           </button>
+        </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        {!projectData ? (
+          <div className="w-full max-w-3xl mx-auto p-8 flex flex-col justify-center animate-in fade-in zoom-in-95 duration-300">
+            <div className="bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
+              <div className="p-6">
+                 <h2 className="text-lg font-semibold mb-4 text-gray-700">URL CodeSandbox ou Paramètre LZ</h2>
+                 <textarea
+                  className="w-full h-48 p-4 text-xs font-mono text-gray-600 bg-gray-50 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none"
+                  placeholder="Collez votre URL ici, ou laissez vide pour créer un nouveau projet..."
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                />
+                <button
+                  onClick={handleManualDecode}
+                  disabled={!libLoaded}
+                  className="w-full mt-4 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-all shadow-md flex justify-center items-center gap-2"
+                >
+                  {libLoaded ? (
+                      input && input.trim() ? <><RefreshCw size={18}/> Analyser & Ouvrir</> : <><PlusCircle size={18}/> Ouvrir Éditeur Vide</>
+                    ) : "Chargement..."
+                  }
+                </button>
+                {error && (
+                  <div className="mt-4 p-3 bg-red-50 text-red-700 text-sm rounded-lg flex items-center gap-2 border border-red-100">
+                    <AlertCircle size={16}/> {error}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="flex w-full h-full">
+            <aside className="w-72 bg-gray-50 border-r border-gray-200 flex flex-col shrink-0">
+                <div className="p-3 border-b border-gray-200 bg-gray-100 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                        <Folder size={14} className="text-gray-500"/>
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Fichiers</span>
+                    </div>
+                    {/* Toolbar de fichiers */}
+                    <div className="flex items-center gap-1">
+                        <button onClick={handleCreateFile} className="p-1 hover:bg-white rounded text-gray-600" title="Nouveau fichier">
+                            <FilePlus size={14}/>
+                        </button>
+                        <button onClick={handleCreateFolder} className="p-1 hover:bg-white rounded text-gray-600" title="Nouveau dossier">
+                            <FolderPlus size={14}/>
+                        </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto py-2">
+                  {fileTree.length > 0 ? (
+                      fileTree.map(node => (
+                        <FileTreeNode 
+                          key={node.path} 
+                          node={node} 
+                          depth={0} 
+                          onFileSelect={(f) => { setActiveFile(f); setViewMode('editor'); }}
+                          activePath={activeFile?.path}
+                          onAction={handleNodeAction}
+                        />
+                      ))
+                  ) : (
+                      <div className="p-4 text-xs text-gray-400 text-center italic">
+                          Aucun fichier.<br/>Créez-en un pour commencer.
+                      </div>
+                  )}
+                </div>
+                
+                <div className="p-3 border-t border-gray-200 bg-white">
+                    <div className="text-[10px] text-gray-400 font-bold uppercase mb-1 flex justify-between">
+                      <span>URL CodeSandbox</span>
+                      <a 
+                        href={getFullShareUrl(input)} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="text-blue-600 hover:text-blue-800 flex items-center gap-1 cursor-pointer"
+                      >
+                        Ouvrir <ExternalLink size={10}/>
+                      </a>
+                    </div>
+                    <div className="flex gap-1">
+                        <input readOnly value={input} className="flex-1 text-[10px] bg-gray-50 border border-gray-200 rounded px-1 truncate font-mono text-gray-600" />
+                        <button 
+                            onClick={copyToClipboard}
+                            className="bg-gray-100 hover:bg-gray-200 text-gray-700 border border-gray-300 p-1.5 rounded transition-colors"
+                            title="Copier"
+                        >
+                            <Copy size={14}/>
+                        </button>
+                    </div>
+                </div>
+            </aside>
+
+            <main className="flex-1 bg-white relative flex flex-col overflow-hidden">
+              {viewMode === 'editor' ? (
+                activeFile ? (
+                  <>
+                    <div className="h-9 flex items-center bg-[#f0f0f0] border-b border-[#e0e0e0]">
+                      <div className="px-4 py-2 bg-white text-sm text-gray-700 border-r border-[#e0e0e0] flex items-center gap-2 border-t-2 border-t-blue-500">
+                         <Code size={14} className="text-blue-500"/>
+                         {activeFile.name}
+                      </div>
+                    </div>
+                    <div className="flex-1 relative overflow-hidden">
+                       <SimpleCodeEditor 
+                            content={activeFile.content} 
+                            fileName={activeFile.name} 
+                            onChange={handleFileChange}
+                       />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-2">
+                    <FileCode size={48} className="text-gray-200"/>
+                    <p>Sélectionnez ou créez un fichier</p>
+                  </div>
+                )
+              ) : (
+                <div className="flex-1 overflow-auto bg-[#1e1e1e] p-4">
+                  <pre className="text-blue-100 text-xs font-mono">
+                    {JSON.stringify(projectData, null, 2)}
+                  </pre>
+                </div>
+              )}
+            </main>
+          </div>
+        )}
+      </div>
+
+      {/* Modal pour Création / Renommage / Suppression */}
+      <Modal 
+        isOpen={modalState.isOpen} 
+        onClose={() => setModalState({ ...modalState, isOpen: false })}
+        title={
+            modalState.type === 'create_file' ? 'Nouveau Fichier' : 
+            modalState.type === 'create_folder' ? 'Nouveau Dossier' : 
+            modalState.type === 'delete' ? 'Confirmation' :
+            'Renommer / Déplacer'
+        }
+      >
+          <div className="flex flex-col gap-4">
+              {modalState.type === 'delete' ? (
+                   <p className="text-sm text-gray-600">
+                       Voulez-vous vraiment supprimer <strong>{modalState.targetNode?.name}</strong> ?
+                       {modalState.targetNode?.type === 'folder' && <span className="block text-red-500 text-xs mt-1">Attention: Cela supprimera tout le contenu du dossier.</span>}
+                   </p>
+              ) : (
+                  <>
+                    <p className="text-sm text-gray-500">
+                        {modalState.type === 'rename' 
+                            ? "Changez le chemin complet pour déplacer le fichier." 
+                            : "Entrez le chemin complet (ex: src/components/Button.js)"}
+                    </p>
+                    <input 
+                        type="text" 
+                        className="w-full p-2 border border-gray-300 rounded text-sm font-mono focus:ring-2 focus:ring-blue-500 outline-none"
+                        value={modalInput}
+                        onChange={(e) => setModalInput(e.target.value)}
+                        autoFocus
+                        onKeyDown={(e) => e.key === 'Enter' && submitModal()}
+                    />
+                  </>
+              )}
+              
+              <div className="flex justify-end gap-2">
+                  <button 
+                    onClick={() => setModalState({ ...modalState, isOpen: false })}
+                    className="px-3 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded"
+                  >
+                      Annuler
+                  </button>
+                  <button 
+                    onClick={submitModal}
+                    className={`px-3 py-2 text-sm text-white rounded shadow-sm ${modalState.type === 'delete' ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'}`}
+                  >
+                      {modalState.type === 'delete' ? 'Supprimer' : 'Valider'}
+                  </button>
+              </div>
+          </div>
+      </Modal>
+
+    </div>
+  );
+}
